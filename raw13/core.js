@@ -20,17 +20,9 @@ const HX_MEM_LEVEL = (function () {
   if (!HX1400_LIGHT_CORE) return 0;
 
   try {
-    const q =
-      new URLSearchParams(location.search).get("mem");
-
-    const n =
-      parseInt(q || "2", 10);
-
-    if (
-      Number.isFinite(n) &&
-      n >= 1 &&
-      n <= 5
-    ) {
+    const q = new URLSearchParams(location.search).get("mem");
+    const n = parseInt(q || "2", 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 5) {
       return n;
     }
   } catch (e) {}
@@ -44,8 +36,8 @@ const HX_MEM_PROFILES = [
   {
     name: "mem1-balanced",
     slots: 3000000,
-    drain: 48,
-    drainsz: 0x8000,
+    drain: 24,
+    drainsz: 0x4000,
     slab: 0x300000,
     bfly: 0x60000,
     sep: 0x8000,
@@ -122,7 +114,7 @@ const CARRIER_SLOTS = (function () {
     const n = q ? parseInt(q, 10) : 0;
     if (n >= 100000 && n <= 40000000) return n;
   } catch (e) {}
-  return HX_MEM ? HX_MEM.slots : 12000000;
+  return HX_MEM ? HX_MEM.slots : 5000000;
 })();
 const CARRIER_BYTES = CARRIER_SLOTS * 8;
 const CAPTURE_DELAY_MS = 50;
@@ -174,18 +166,13 @@ globalThis.__CORE_MEM_INFO =
   Object.freeze({
     hx1400: HX1400_LIGHT_CORE,
     memLevel: HX_MEM_LEVEL,
-    profile:
-      HX_MEM ? HX_MEM.name : null,
-
+    profile: HX_MEM ? HX_MEM.name : null,
     slots: CARRIER_SLOTS,
     carrierBytes: CARRIER_BYTES,
-
     drainCount: DRAIN_COUNT,
     drainSize: DRAIN_SIZE,
-
     slabSize: SLAB_SIZE,
-    estimatedBytes:
-      __CORE_MEM_ESTIMATED_BYTES,
+    estimatedBytes: __CORE_MEM_ESTIMATED_BYTES,
   });
 
 
