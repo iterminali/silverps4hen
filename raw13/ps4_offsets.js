@@ -693,7 +693,7 @@ PS4["14.00"] = Object.assign({}, PS4["13.52"], {
   k__error: undefined,
 
   kpatch: "1400.bin",
-  payload: "payload-1400.bin",
+  payload: "payload.bin",
 });
 
 export function offsetsFor(uaString) {
