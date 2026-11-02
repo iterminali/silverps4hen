@@ -18,9 +18,10 @@ const DEV_DCE = "/dev/dce", OPS_OFF = 0x985a;
 const CANDS = [128, 96, 160, 64, 192, 32, 224, 120, 136, 88, 104, 152, 168, 56, 72, 184, 200, 24, 40, 216, 232, 8, 16, 48, 80, 112, 144, 176, 208, 240];
 const ROUNDS = 6;
 
-// 14.00 kernel offsets (scene-verified, 2026-09-19)
+// 14.00 kernel offsets (Scene-Collective ps4-hen 1400.h)
 const K_SYSENT = 0x1102B70;
-const K_SYSENT_11_CALL = K_SYSENT + (11 * 0x20) + 8; // = 0x1102CD8
+// sysent[11].sy_call is the +8 field inside the entry struct
+const K_SYSENT_11_CALL = K_SYSENT + (11 * 0x20) + 8; // 0x1102CD8
 
 const STATE = { ctx: null, kbase: 0n, kva: -1n, targetFd: -1, fakePage: 0n, rwReady: false };
 
