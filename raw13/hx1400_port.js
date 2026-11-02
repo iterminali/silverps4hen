@@ -653,18 +653,31 @@ function parseKbase(buffer, length) {
         }
 
         const candidate = qword - BigInt(P[12]);
+        const candidateLow = Number(candidate & 0xffffffffn);
+
+        // Restrict to the plausible kernel .text range on PS4 14.00
+        const inRange = candidateLow >= 0x80000000 && candidateLow <= 0x89000000;
 
         if (
           (candidate & 0x3fffn) === 0n &&
           (candidate >> 32n) === 0xffffffffn
         ) {
-          if (hits === 0) {
-            base = candidate;
-          } else if (base !== candidate) {
-            conflict = true;
+          if (inRange) {
+            if (hits === 0) {
+              base = candidate;
+            } else if (base !== candidate) {
+              conflict = true;
+            }
+            hits++;
+          } else {
+            log(
+              "HX1400-KBASE-REJECT",
+              "q=0x" + qword.toString(16) +
+              " cand=0x" + candidate.toString(16) +
+              " low=0x" + candidateLow.toString(16) +
+              " out-of-range",
+            );
           }
-
-          hits++;
         }
       }
     }
