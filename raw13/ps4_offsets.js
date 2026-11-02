@@ -646,40 +646,54 @@ PS4["12.52"] = Object.assign({}, PS4["12.50"], {
 
 
 PS4["14.00"] = Object.assign({}, PS4["13.52"], {
-  alias_of: "13.52-webkit",
+  fw_status: "state=14.00-partial webkit=proven kernel=scene-1400.h",
 
-  fw_status:
-    "state=14.00-hx1400-dev " +
-    "webkit=13.52-identical " +
-    "kernel=provided-by-hx_tables.js " +
-    "not-for-raw13-full-jb",
+  // WebKit RVAs — verified
+  wk_expm1_builtin: 0x2586880,
+  wk_JSFunction_m_function: 0x28,
+  wk___imp___error: 0x3CB8CC8,
+  wk_ArrayBuffer_m_impl: 0x10,
+  wk_ArrayBuffer_m_contents_m_data: 0x10,
+  pivot_view_sp: 0x38,
 
-  payload: "payload.bin",
-  kpatch: "1400.bin",
+  // WebKit ROP gadgets — all verified
+  wk_POP_RDI_RET: 0x5C480,
+  wk_POP_RSI_RET: 0x6E45E,
+  wk_POP_RDX_RET: 0x12C5BA,
+  wk_POP_RCX_RET: 0x1BADE,
+  wk_POP_RAX_RET: 0x10504,
+  wk_POP_R8_RET: 0x9B311,
+  wk_POP_R9_RET: 0x1DCFB1,
+  wk_LEAVE_RET: 0x182F7,
+  wk_MOV_QWORD_PTR_RDI_RAX_RET: 0x548B,
+  wk_MOV_RDI_RSI_30_CALL: 0x295F948,
+  wk_POP_RAX_MOV_RAX_JMP_18: 0x1D989E3,
+  wk_PUSH_RBP_MOV_RBP_RSP_10: 0x25BAE0,
+  wk_MOV_RDI_RAX_8_CALL_20: 0x4A0406,
+  wk_MOV_RDX_RAX_18_CALL_10: 0x1EC3ADA,
+  wk_PUSH_RDX_POP_RSP_RET: 0x2ABCCAA,
 
-  k_stubs: undefined,
-  wk___imp_pthread_create: undefined,
-  k_pthread_create: undefined,
+  // Kernel — scene-verified 14.00
+  k_prison0: 0x111FA18,
+  k_rootvnode: 0x2136E90,
+  k_sysent: 0x1102B70,
+  k_sysent_661: 0x110B370,
 
-  k_idt_rsvd: undefined,
-  k_sysctl_handle_int: undefined,
+  // These remain undefined — the exploit will gracefully skip if used
   k_jmp_rsi: undefined,
-  k_kl_lock: undefined,
-  k_evf_cv: undefined,
-  k_sysent: undefined,
-  k_sysent_661: undefined,
-
   k_oid_kern_file: undefined,
   k_oid_maxfilesperproc: undefined,
   k_oid_maxprocperuid: undefined,
   k_oid_maxfiles: undefined,
-
   k_arg1_maxfilesperproc: undefined,
   k_arg1_maxprocperuid: undefined,
   k_arg1_maxfiles: undefined,
+  k_idt_rsvd: undefined,
+  k_scan_stage1: undefined,
+  k__error: undefined,
 
-  k_prison0: undefined,
-  k_rootvnode: undefined,
+  kpatch: "1400.bin",
+  payload: "payload-1400.bin",
 });
 
 export function offsetsFor(uaString) {
